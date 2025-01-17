@@ -24,8 +24,3 @@ The datasets contain the following behaviors:
 - Operations on various applications.
 - Operations involving the Flash.
 - Browser activities, including visiting different webpages such as Amazon, Wikipedia, Google searches, and downloaded some files.
-
-## Contact
-hailun.ding@rutgers.edu
-
-Please contact me by email, I cannot receive github notifications for some unknown reason.
