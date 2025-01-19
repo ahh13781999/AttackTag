@@ -14,9 +14,14 @@
 # limitations under the License.
 """Tokenization classes."""
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import collections
 import re
 import unicodedata
+import six
 import tensorflow as tf
 
 
@@ -72,13 +77,22 @@ def validate_case_matches_checkpoint(do_lower_case, init_checkpoint):
 
 def convert_to_unicode(text):
   """Converts `text` to Unicode (if it's not already), assuming utf-8 input."""
-
-  if isinstance(text, str):
-    return text
-  elif isinstance(text, bytes):
-    return text.decode("utf-8", "ignore")
+  if six.PY3:
+    if isinstance(text, str):
+      return text
+    elif isinstance(text, bytes):
+      return text.decode("utf-8", "ignore")
+    else:
+      raise ValueError("Unsupported string type: %s" % (type(text)))
+  elif six.PY2:
+    if isinstance(text, str):
+      return text.decode("utf-8", "ignore")
+    elif isinstance(text, unicode):
+      return text
+    else:
+      raise ValueError("Unsupported string type: %s" % (type(text)))
   else:
-    raise ValueError(f"Unsupported string type: {type(text)}")
+    raise ValueError("Not running on Python2 or Python 3?")
 
 
 def printable_text(text):
@@ -108,10 +122,14 @@ def load_vocab(vocab_file):
   """Loads a vocabulary file into a dictionary."""
   vocab = collections.OrderedDict()
   index = 0
-  with tf.io.gfile.GFile(vocab_file, "r") as reader:
-      for index, token in enumerate(map(str.strip, reader)):
-        if token:
-          vocab[token] = index
+  with tf.gfile.GFile(vocab_file, "r") as reader:
+    while True:
+      token = convert_to_unicode(reader.readline())
+      if not token:
+        break
+      token = token.strip()
+      vocab[token] = index
+      index += 1
   return vocab
 
 
@@ -133,7 +151,11 @@ def convert_ids_to_tokens(inv_vocab, ids):
 
 def whitespace_tokenize(text):
   """Runs basic whitespace cleaning and splitting on a piece of text."""
-  return text.strip().split() if text.strip() else []
+  text = text.strip()
+  if not text:
+    return []
+  tokens = text.split()
+  return tokens
 
 
 class FullTokenizer(object):
@@ -173,8 +195,8 @@ class BasicTokenizer(object):
 
   def tokenize(self, text):
     """Tokenizes a piece of text."""
-    text = self._clean_text(convert_to_unicode(text))
-    text = self._tokenize_chinese_chars(text)
+    text = convert_to_unicode(text)
+    text = self._clean_text(text)
 
     # This was added on November 1st, 2018 for the multilingual and Chinese
     # models. This is also applied to the English models now, but it doesn't
@@ -182,30 +204,64 @@ class BasicTokenizer(object):
     # and generally don't have any Chinese data in them (there are Chinese
     # characters in the vocabulary because Wikipedia does have some Chinese
     # words in the English Wikipedia.).
+    text = self._tokenize_chinese_chars(text)
 
-    tokens = whitespace_tokenize(text)
+    orig_tokens = whitespace_tokenize(text)
     split_tokens = []
-    for token in tokens:
+    for token in orig_tokens:
       if self.do_lower_case:
-        token = self._strip_accents(token = token.lower())
-      split_tokens.extend(self._split_on_punctuation(token))
-    return whitespace_tokenize(" ".join(split_tokens))
+        token = token.lower()
+        token = self._run_strip_accents(token)
+      split_tokens.extend(self._run_split_on_punc(token))
 
-  def _strip_accents(self, text):
+    output_tokens = whitespace_tokenize(" ".join(split_tokens))
+    return output_tokens
+
+  def _run_strip_accents(self, text):
     """Strips accents from a piece of text."""
-    return "".join(char for char in unicodedata.normalize("NFD", text) if unicodedata.category(char) != "Mn")
+    text = unicodedata.normalize("NFD", text)
+    output = []
+    for char in text:
+      cat = unicodedata.category(char)
+      if cat == "Mn":
+        continue
+      output.append(char)
+    return "".join(output)
 
-  @staticmethod
-  def _split_on_punctuation(text):
+  def _run_split_on_punc(self, text):
     """Splits punctuation on a piece of text."""
-    return re.split(r'([^\w]+)', text)
+    chars = list(text)
+    i = 0
+    start_new_word = True
+    output = []
+    while i < len(chars):
+      char = chars[i]
+      if _is_punctuation(char):
+        output.append([char])
+        start_new_word = True
+      else:
+        if start_new_word:
+          output.append([])
+        start_new_word = False
+        output[-1].append(char)
+      i += 1
+
+    return ["".join(x) for x in output]
 
   def _tokenize_chinese_chars(self, text):
     """Adds whitespace around any CJK character."""
-    return "".join(f" {char} " if self._is_chinese_char(char) else char for char in text)
+    output = []
+    for char in text:
+      cp = ord(char)
+      if self._is_chinese_char(cp):
+        output.append(" ")
+        output.append(char)
+        output.append(" ")
+      else:
+        output.append(char)
+    return "".join(output)
 
-  @staticmethod
-  def _is_chinese_char(char):
+  def _is_chinese_char(self, cp):
     """Checks whether CP is the codepoint of a CJK character."""
     # This defines a "chinese character" as anything in the CJK Unicode block:
     #   https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
@@ -215,13 +271,30 @@ class BasicTokenizer(object):
     # as is Japanese Hiragana and Katakana. Those alphabets are used to write
     # space-separated words, so they are not treated specially and handled
     # like the all of the other languages.
-    cp = ord(char)
-    return (0x4E00 <= cp <= 0x9FFF) or (0x3400 <= cp <= 0x4DBF) or (0x20000 <= cp <= 0x2A6DF)
+    if ((cp >= 0x4E00 and cp <= 0x9FFF) or  #
+        (cp >= 0x3400 and cp <= 0x4DBF) or  #
+        (cp >= 0x20000 and cp <= 0x2A6DF) or  #
+        (cp >= 0x2A700 and cp <= 0x2B73F) or  #
+        (cp >= 0x2B740 and cp <= 0x2B81F) or  #
+        (cp >= 0x2B820 and cp <= 0x2CEAF) or
+        (cp >= 0xF900 and cp <= 0xFAFF) or  #
+        (cp >= 0x2F800 and cp <= 0x2FA1F)):  #
+      return True
 
-  @staticmethod
-  def _clean_text(text):
+    return False
+
+  def _clean_text(self, text):
     """Performs invalid character removal and whitespace cleanup on text."""
-    return "".join(char if not unicodedata.category(char).startsWith("C") else " " for char in text)
+    output = []
+    for char in text:
+      cp = ord(char)
+      if cp == 0 or cp == 0xfffd or _is_control(char):
+        continue
+      if _is_whitespace(char):
+        output.append(" ")
+      else:
+        output.append(char)
+    return "".join(output)
 
 
 class WordpieceTokenizer(object):
